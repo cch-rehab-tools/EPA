@@ -142,6 +142,7 @@ header.app p{font-size:.78rem;color:#6B6B60;margin-top:2px}
       <details class="lvkey" style="margin-top:12px">
         <summary>用 AI 整理觀察筆記（選用）</summary>
         <div class="body">
+          <div class="field full" style="margin-bottom:10px"><label for="employeeId">院方共用 AI 員工編號（僅確認使用資格，不會隨觀察筆記存檔）</label><input id="employeeId" type="text" inputmode="numeric" autocomplete="off" placeholder="輸入指定員工編號即可使用院方共用 AI" oninput="rememberEmployeeId()"></div>
           <div class="field full" style="margin-bottom:10px"><label>觀察筆記（口語、片段皆可）</label><textarea id="f_raw" placeholder="例：個案辨識正確，病史收集完整。評估工具選擇還需再想清楚。下次可先列出可能的工具清單再選。"></textarea></div>
           <button class="aibtn" id="aiBtn" onclick="runAI()">✨ AI 整理</button>
           <button class="aibtn ghost" onclick="copyPrompt()">📋 複製整理指令</button>
@@ -171,6 +172,7 @@ const SCOPE=["動作功能","感覺功能","知覺功能","認知功能","日常
 const DOMAIN_LABEL={phys:"生理領域",peds:"兒童領域"};
 let curDomain="phys", curIdx=0;
 const S={role:"",src:"",scope:[],scores:{},overall:""};
+const SHARED_AI_ENDPOINT="https://cch-rehab-api.lightgreen93.workers.dev/ai";
 function DOM(){return DATA[curDomain];}
 function EPA(){return DOM().forms[curIdx];}
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
@@ -253,6 +255,14 @@ function pickScore(key,val,btn){
   row.querySelectorAll("button").forEach(b=>b.classList.remove("on"));
   btn.classList.add("on");
 }
+function rememberEmployeeId(){
+  const input=document.getElementById("employeeId");
+  try{sessionStorage.setItem("cchEmployeeId",input.value.trim());}catch(e){}
+  updateKeyBtn();
+}
+function initEmployeeId(){
+  try{document.getElementById("employeeId").value=sessionStorage.getItem("cchEmployeeId")||"";}catch(e){}
+}
 function openKeySettings(){
   const cur=localStorage.getItem('userGeminiApiKey')||"";
   const status=cur?"✅ 此裝置已設定金鑰（結尾 …"+cur.slice(-4)+"）":"⚠️ 此裝置尚未設定金鑰";
@@ -266,36 +276,84 @@ function openKeySettings(){
 }
 function updateKeyBtn(){
   const b=document.getElementById("keyBtn");const has=!!localStorage.getItem('userGeminiApiKey');
+  const hasEmployeeId=!!document.getElementById("employeeId").value.trim();
   b.textContent=has?"🔑 金鑰已設定":"🔑 AI 金鑰";
   b.style.background=has?"var(--teal-soft)":"#fff";b.style.color=has?"var(--teal)":"var(--amber)";
-  document.getElementById("aiNote").innerHTML=has?"✅ 已設定金鑰，可直接「AI 整理」。AI 會把觀察筆記歸納為「優點／缺點／共識行動」三段填入回饋欄。":"三種方式：① 點「🔑 AI 金鑰」設定後可一鍵整理 ② 點「複製整理指令」貼到自己的 AI ③ 直接在上方回饋欄手動填寫。";
+  document.getElementById("aiNote").innerHTML=hasEmployeeId
+    ?"✅ 已輸入員工編號，將使用院方共用 AI，把觀察筆記整理為「優點／缺點／共識行動」。"
+    :(has
+      ?"✅ 已設定個人金鑰，可在未輸入員工編號時使用「AI 整理」。"
+      :"四種方式：① 輸入員工編號使用院方共用 AI ② 設定個人 AI 金鑰 ③ 複製整理指令到慣用 AI ④ 手動填寫。");
 }
 function buildPrompt(notes){
   return "你是職能治療臨床教師的助理。以下是教師對學員在「"+EPA().topic+"」這項可信賴專業活動（"+DOM().label+" "+EPA().code+"）的觀察筆記，請整理成正式的質性回饋，分成「優點」、「缺點」、「共識行動」三段。\n規則：\n1. 使用繁體中文、臨床專業但精簡的語氣，以具體行為描述為主，每段 1～3 句。\n2. 正向表現放入「優點」；待改進與具體建議放入「缺點」；下次觀察前可執行的具體目標放入「共識行動」。\n3. 筆記中沒有提到的內容不要編造；若某段沒有對應內容請寫「（無）」。\n4. 不要出現病人姓名等可識別資訊。\n5. 直接輸出三段，格式為：\n優點：...\n缺點：...\n共識行動：...\n\n觀察筆記：\n"+notes;
 }
 function showErr(html){const e=document.getElementById("aiErr");e.style.color="#A33";e.style.background="#FFF0F0";e.innerHTML=html;e.style.display="block";}
+async function runSharedAI(employeeId,notes){
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),35000);
+  try{
+    const r=await fetch(SHARED_AI_ENDPOINT,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        employeeId,
+        formType:"epa",
+        notes,
+        context:{
+          domain:DOM().label,
+          code:EPA().code,
+          topic:EPA().topic,
+          items:EPA().items
+        }
+      }),
+      signal:controller.signal
+    });
+    let data={};
+    try{data=await r.json();}catch(e){}
+    if(!r.ok||!data.ok)throw new Error(data.error||"院方共用 AI 暫時無法使用。");
+    const feedback=data.feedback||{};
+    return [
+      "優點："+(feedback.strengths||"（無）"),
+      "缺點："+(feedback.improve||"（無）"),
+      "共識行動："+(feedback.action||"（無）")
+    ].join("\n");
+  }catch(e){
+    if(e.name==="AbortError")throw new Error("AI 回應逾時，請稍後再試。");
+    throw e;
+  }finally{clearTimeout(timeout);}
+}
+async function runPersonalKeyAI(key,notes){
+  const delays=[800,1600,3200];
+  let out="";
+  for(let a=0;a<3;a++){
+    try{
+      const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+encodeURIComponent(key),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:buildPrompt(notes)}]}]})});
+      if(!r.ok)throw new Error("HTTP "+r.status);
+      const d=await r.json();out=d&&d.candidates&&d.candidates[0]&&d.candidates[0].content&&d.candidates[0].content.parts[0].text||"";
+      if(out)break;throw new Error("空白回應");
+    }catch(e){if(a<2){await new Promise(s=>setTimeout(s,delays[a]));}else throw e;}
+  }
+  return out.trim();
+}
 async function runAI(){
   const notes=document.getElementById("f_raw").value.trim();
+  const employeeId=document.getElementById("employeeId").value.trim();
+  const key=localStorage.getItem('userGeminiApiKey');
   document.getElementById("aiErr").style.display="none";
   if(!notes){showErr("請先貼入觀察筆記。");return;}
-  const key=localStorage.getItem('userGeminiApiKey');
-  if(!key){showErr("此裝置尚未設定金鑰。可點「🔑 AI 金鑰」設定，或改用「複製整理指令」、直接手動填寫。");return;}
+  if(!employeeId&&!key){showErr("請先輸入指定員工編號使用院方共用 AI。你也可以設定個人金鑰、複製整理指令或直接手動填寫。");return;}
   const btn=document.getElementById("aiBtn");btn.disabled=true;btn.textContent="整理中…";
-  const delays=[800,1600,3200];
   try{
-    let out="";
-    for(let a=0;a<3;a++){
-      try{
-        const r=await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+key,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({contents:[{parts:[{text:buildPrompt(notes)}]}]})});
-        if(!r.ok) throw new Error("HTTP "+r.status);
-        const d=await r.json();out=d&&d.candidates&&d.candidates[0]&&d.candidates[0].content&&d.candidates[0].content.parts[0].text||"";
-        if(out)break;throw new Error("空白回應");
-      }catch(e){if(a<2){await new Promise(s=>setTimeout(s,delays[a]));}else throw e;}
-    }
-    document.getElementById("f_fb").value=out.trim();
-    document.getElementById("barMsg").textContent="✅ 已整理並填入回饋欄，請檢視後再匯出。";
+    const out=employeeId
+      ?await runSharedAI(employeeId,notes)
+      :await runPersonalKeyAI(key,notes);
+    document.getElementById("f_fb").value=out;
+    document.getElementById("barMsg").textContent=employeeId
+      ?"✅ 院方共用 AI 已整理並填入回饋欄，請檢視後再匯出。"
+      :"✅ 個人 AI 已整理並填入回饋欄，請檢視後再匯出。";
     setTimeout(()=>document.getElementById("barMsg").textContent="",6000);
-  }catch(e){showErr("整理失敗："+e.message+"。可改用「複製整理指令」或手動填寫。");}
+  }catch(e){showErr("整理失敗："+e.message+" 可改用「複製整理指令」或手動填寫。");}
   finally{btn.disabled=false;btn.textContent="✨ AI 整理";}
 }
 function copyPrompt(){
@@ -370,7 +428,7 @@ function clearAll(){
 }
 renderDomainTabs();renderTabs();applyDomainFields();
 renderChips("chips_role",ROLES,"role");renderChips("chips_src",SRCS,"src");
-renderItems();updateKeyBtn();
+renderItems();initEmployeeId();updateKeyBtn();
 </script>
 </body>
 </html>
